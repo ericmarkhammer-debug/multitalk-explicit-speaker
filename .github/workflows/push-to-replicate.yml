@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # Easy to edit: full push target (no https:// prefix)
   REPLICATE_MODEL: r8.im/ericmarkhammer-debug/multitalk-explicit-speaker
 
@@ -22,6 +23,13 @@ jobs:
         uses: replicate/setup-cog@v2
         with:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
+
+      - name: Show repo state before cog push
+        run: |
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          git rev-parse HEAD
+          echo "---- cog.yaml ----"
+          cat cog.yaml
 
       - name: Push model to Replicate
         run: cog push "${REPLICATE_MODEL}"
