@@ -1,5 +1,6 @@
 build:
   gpu: true
+  # Toolkit in image must match PyTorch CUDA flavor in requirements.txt (cu121) or flash-attn wheel build fails.
   cuda: "12.1"
   system_packages:
     - ffmpeg
@@ -7,5 +8,6 @@ build:
   python_requirements: requirements.txt
   run:
     - curl -o /usr/local/bin/pget -L "https://github.com/replicate/pget/releases/latest/download/pget_$(uname -s)_$(uname -m)" && chmod +x /usr/local/bin/pget
+    # Requires torch+CUDA already aligned with build.cuda (see requirements.txt --extra-index-url cu121).
     - pip install flash-attn --no-build-isolation
 predict: "predict.py:Predictor"
