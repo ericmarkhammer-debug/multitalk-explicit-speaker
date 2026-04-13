@@ -34,15 +34,13 @@ import random
 import soundfile as sf
 from PIL import Image
 
-# Import MultiTalk components
-import wan
-from wan.configs import WAN_CONFIGS
+# MultiTalk (`wan`) is imported lazily in setup()/predict() so Cog schema validation
+# can import this module on builders without an NVIDIA driver.
 from transformers import Wav2Vec2FeatureExtractor
 from src.audio_analysis.wav2vec2 import Wav2Vec2Model
 import librosa
 import pyloudnorm as pyln
 from einops import rearrange
-from wan.utils.multitalk_utils import save_video_ffmpeg
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +327,9 @@ class Predictor(BasePredictor):
         
         # Load MultiTalk pipeline
         print("Loading MultiTalk pipeline...")
+        import wan
+        from wan.configs import WAN_CONFIGS
+
         self.cfg = WAN_CONFIGS["multitalk-14B"]
         self.wan_i2v = wan.MultiTalkPipeline(
             config=self.cfg,
@@ -657,6 +658,8 @@ class Predictor(BasePredictor):
             # Save video (following original save pattern)
             output_name = f"multitalk_{abs(hash(prompt + str(seed))) % 10000}"
             print(f"💾 Saving video...")
+            from wan.utils.multitalk_utils import save_video_ffmpeg
+
             save_video_ffmpeg(video, output_name, [input_data['video_audio']])
             
             # Find and return generated video
