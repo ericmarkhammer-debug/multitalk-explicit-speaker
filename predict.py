@@ -357,9 +357,9 @@ class Predictor(BasePredictor):
             description="Text prompt describing the desired interaction or conversation scenario",
             default="A smiling man and woman wearing headphones sit in front of microphones, appearing to host a podcast."
         ),
-        second_audio: Optional[Path] = Input(
+        second_audio: Path = Input(
             description="Second audio file for multi-person conversation (optional)",
-            default=None
+            default=None,
         ),
         num_frames: int = Input(
             description="Number of frames to generate (automatically adjusted to nearest valid value of form 4n+1, e.g., 81, 181)",
