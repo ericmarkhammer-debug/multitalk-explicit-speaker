@@ -1,9 +1,11 @@
-# PyTorch must use cu121 wheels to match cog.yaml build.cuda: "12.1" so flash-attn
-# (built in cog run) sees the same CUDA major as the installed torch build.
---extra-index-url https://download.pytorch.org/whl/cu121
+# Torch wheels: primary index is PyTorch cu121 only (no PyPI), so pip cannot pick cu130 builds.
+--index-url https://download.pytorch.org/whl/cu121
 torch==2.5.1
 torchvision==0.20.1
 torchaudio==2.5.1
+
+# Remaining packages are not hosted on download.pytorch.org; use PyPI as primary index below.
+--index-url https://pypi.org/simple
 opencv-python>=4.9.0.80
 diffusers>=0.31.0
 transformers>=4.49.0
