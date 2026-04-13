@@ -189,4 +189,4 @@ cython_debug/
 *.mov
 *.avi
 *.mkv
-*.flv
+*.flv.DS_Store
