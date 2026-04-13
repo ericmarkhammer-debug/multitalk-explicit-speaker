@@ -20,10 +20,10 @@ import logging
 import sys
 import warnings
 import shutil
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from datetime import datetime
 from types import SimpleNamespace
-from cog import BasePredictor, Input, Path
+from cog import BasePredictor, File, Input, Path as CogPath
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -47,7 +47,7 @@ from wan.utils.multitalk_utils import save_video_ffmpeg
 logger = logging.getLogger(__name__)
 
 
-def parse_bbox_input(raw: Any) -> Optional[List[float]]:
+def parse_bbox_input(raw: Any) -> List[float] | None:
     """Parse bbox JSON into [row_min, col_min, row_max, col_max] (see README / Cog Input docs)."""
     if raw is None:
         return None
@@ -138,7 +138,7 @@ def build_bbox_payload(
 
 
 def resolve_inactive_speaker_mode(
-    inactive_speaker_mode: str, second_audio: Optional[Path]
+    inactive_speaker_mode: str, second_audio: File | None
 ) -> str:
     if inactive_speaker_mode == "auto":
         return "second_audio" if second_audio is not None else "none"
@@ -146,8 +146,8 @@ def resolve_inactive_speaker_mode(
 
 
 def resolve_multitalk_audio_assignment(
-    inactive_eff: str, active_speaker: Optional[str]
-) -> Tuple[bool, Dict[str, Optional[str]]]:
+    inactive_eff: str, active_speaker: str | None
+) -> Tuple[bool, Dict[str, str | None]]:
     """
     Returns (use_two_audio_files, assign) where assign maps person slots to
     'first' | 'second' | None (which file drives that slot; None = silent / no file).
@@ -262,6 +262,19 @@ def download_weights(url: str, dest: str) -> None:
     print("[+] Download completed in: ", time.time() - start, "seconds")
 
 
+def predict_input(*, nullable: bool = False, **kwargs: Any) -> Any:
+    """
+    Wrapper for cog.Input. Passes nullable=True when the installed Cog supports it
+    (Replicate); falls back to plain Input() on PyPI Cog.
+    """
+    if nullable:
+        try:
+            return Input(nullable=True, **kwargs)  # type: ignore[call-arg]
+        except TypeError:
+            pass
+    return Input(**kwargs)
+
+
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
@@ -351,15 +364,16 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        image: Path = Input(description="Reference image containing the person(s) for video generation"),
-        first_audio: Path = Input(description="First audio file for driving the conversation"),
+        image: CogPath = Input(description="Reference image containing the person(s) for video generation"),
+        first_audio: CogPath = Input(description="First audio file for driving the conversation"),
         prompt: str = Input(
             description="Text prompt describing the desired interaction or conversation scenario",
             default="A smiling man and woman wearing headphones sit in front of microphones, appearing to host a podcast."
         ),
-        second_audio: Path = Input(
+        second_audio: File | None = predict_input(
             description="Second audio file for multi-person conversation (optional)",
             default=None,
+            nullable=True,
         ),
         num_frames: int = Input(
             description="Number of frames to generate (automatically adjusted to nearest valid value of form 4n+1, e.g., 81, 181)",
@@ -373,38 +387,43 @@ class Predictor(BasePredictor):
             ge=2,
             le=100
         ),
-        seed: Optional[int] = Input(
+        seed: int | None = predict_input(
             description="Random seed for reproducible results",
-            default=None
+            default=None,
+            nullable=True,
         ),
         turbo: bool = Input(
             description="Enable turbo mode optimizations (adjusts thresholds and guidance scales for speed)",
             default=True
         ),
-        person1_bbox: Optional[str] = Input(
+        person1_bbox: str | None = predict_input(
             description="Optional JSON list of 4 floats: [row_min, col_min, row_max, col_max] in pixel indices on the cond image before resize. Matches wan/multitalk.py mask slice human_mask[row_min:row_max, col_min:col_max] with shape [image_height, image_width]. NOT [x1,y1,x2,y2] Cartesian order. If set, person2_bbox is required.",
             default=None,
+            nullable=True,
         ),
-        person2_bbox: Optional[str] = Input(
+        person2_bbox: str | None = predict_input(
             description="Same as person1_bbox: [row_min, col_min, row_max, col_max] for person 2. If set, person1_bbox is required.",
             default=None,
+            nullable=True,
         ),
-        active_speaker: Optional[str] = Input(
+        active_speaker: str | None = predict_input(
             description="When using bboxes: which person receives first_audio if inactive_speaker_mode is none; required with person bboxes.",
             default=None,
             choices=["person1", "person2"],
+            nullable=True,
         ),
         inactive_speaker_mode: str = Input(
             description="auto: second stream if second_audio is set, else single-stream slots. none: only active_speaker gets audio (needs bboxes). second_audio: two files (first_audio→person1, second_audio→person2).",
             default="auto",
             choices=["auto", "none", "second_audio"],
         ),
-        audio_type: Optional[str] = Input(
+        audio_type: str | None = predict_input(
             description="Two-stream mixing for wav2vec prep: para or add. Omit for defaults (para when only one active speaker in two-person mode; add for two-file mode).",
             default=None,
             choices=["para", "add"],
+            nullable=True,
         ),
-    ) -> Path:
+    ) -> CogPath:
         """Generate a conversational video from audio and reference image"""
         
         # Auto-correct frame count to nearest valid value (4n+1 format)
@@ -661,4 +680,4 @@ class Predictor(BasePredictor):
                 torch.cuda.empty_cache()
                 
             print(f"✅ Video generation completed: {final_output}")
-            return Path(final_output)
+            return CogPath(final_output)
