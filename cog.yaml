@@ -12,5 +12,6 @@ build:
     # flash-attn compiles against the image CUDA (12.1), so torch must be cu121 here — reinstall immediately before flash-attn.
     - pip uninstall -y torch torchvision torchaudio || true
     - pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+    - python -c "import torch; print('TORCH_DEBUG', torch.__version__, torch.version.cuda)"
     - pip install --no-cache-dir flash-attn --no-build-isolation --no-deps
 predict: "predict.py:Predictor"
