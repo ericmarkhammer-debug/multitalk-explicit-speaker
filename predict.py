@@ -260,19 +260,6 @@ def download_weights(url: str, dest: str) -> None:
     print("[+] Download completed in: ", time.time() - start, "seconds")
 
 
-def predict_input(*, nullable: bool = False, **kwargs: Any) -> Any:
-    """
-    Wrapper for cog.Input. Passes nullable=True when the installed Cog supports it
-    (Replicate); falls back to plain Input() on PyPI Cog.
-    """
-    if nullable:
-        try:
-            return Input(nullable=True, **kwargs)  # type: ignore[call-arg]
-        except TypeError:
-            pass
-    return Input(**kwargs)
-
-
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
@@ -371,10 +358,9 @@ class Predictor(BasePredictor):
             description="Text prompt describing the desired interaction or conversation scenario",
             default="A smiling man and woman wearing headphones sit in front of microphones, appearing to host a podcast."
         ),
-        second_audio: File | None = predict_input(
+        second_audio: File = Input(
             description="Second audio file for multi-person conversation (optional)",
             default=None,
-            nullable=True,
         ),
         num_frames: int = Input(
             description="Number of frames to generate (automatically adjusted to nearest valid value of form 4n+1, e.g., 81, 181)",
@@ -388,44 +374,45 @@ class Predictor(BasePredictor):
             ge=2,
             le=100
         ),
-        seed: int | None = predict_input(
+        seed: int = Input(
             description="Random seed for reproducible results",
             default=None,
-            nullable=True,
         ),
         turbo: bool = Input(
             description="Enable turbo mode optimizations (adjusts thresholds and guidance scales for speed)",
             default=True
         ),
-        person1_bbox: str | None = predict_input(
+        person1_bbox: str = Input(
             description="Optional JSON list of 4 floats: [row_min, col_min, row_max, col_max] in pixel indices on the cond image before resize. Matches wan/multitalk.py mask slice human_mask[row_min:row_max, col_min:col_max] with shape [image_height, image_width]. NOT [x1,y1,x2,y2] Cartesian order. If set, person2_bbox is required.",
             default=None,
-            nullable=True,
         ),
-        person2_bbox: str | None = predict_input(
+        person2_bbox: str = Input(
             description="Same as person1_bbox: [row_min, col_min, row_max, col_max] for person 2. If set, person1_bbox is required.",
             default=None,
-            nullable=True,
         ),
-        active_speaker: str | None = predict_input(
+        active_speaker: str = Input(
             description="When using bboxes: which person receives first_audio if inactive_speaker_mode is none; required with person bboxes.",
             default=None,
             choices=["person1", "person2"],
-            nullable=True,
         ),
         inactive_speaker_mode: str = Input(
             description="auto: second stream if second_audio is set, else single-stream slots. none: only active_speaker gets audio (needs bboxes). second_audio: two files (first_audio→person1, second_audio→person2).",
             default="auto",
             choices=["auto", "none", "second_audio"],
         ),
-        audio_type: str | None = predict_input(
+        audio_type: str = Input(
             description="Two-stream mixing for wav2vec prep: para or add. Omit for defaults (para when only one active speaker in two-person mode; add for two-file mode).",
             default=None,
             choices=["para", "add"],
-            nullable=True,
         ),
     ) -> CogPath:
         """Generate a conversational video from audio and reference image"""
+
+        # Optional inputs use non-union types for Cog schema; normalize sentinels for runtime.
+        if isinstance(active_speaker, str) and not active_speaker.strip():
+            active_speaker = None
+        if isinstance(audio_type, str) and not audio_type.strip():
+            audio_type = None
         
         # Auto-correct frame count to nearest valid value (4n+1 format)
         original_frames = num_frames
