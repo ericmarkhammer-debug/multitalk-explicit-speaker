@@ -1,0 +1,27 @@
+# Manually push this Cog model to Replicate (Actions → Run workflow).
+# 1. Set repository secret REPLICATE_API_TOKEN (https://replicate.com/account/api-tokens)
+# 2. Edit REPLICATE_MODEL below to your r8.im destination
+
+name: Push to Replicate
+
+on:
+  workflow_dispatch:
+
+env:
+  # Easy to edit: full push target (no https:// prefix)
+  REPLICATE_MODEL: r8.im/ericmarkhammer-debug/multitalk-explicit-speaker
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Cog and log in to Replicate
+        uses: replicate/setup-cog@v2
+        with:
+          token: ${{ secrets.REPLICATE_API_TOKEN }}
+
+      - name: Push model to Replicate
+        run: cog push "${REPLICATE_MODEL}"
