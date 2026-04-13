@@ -14,12 +14,13 @@ import os
 import subprocess
 import time
 import json
+import math
 import tempfile
 import logging
 import sys
 import warnings
 import shutil
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from types import SimpleNamespace
 from cog import BasePredictor, Input, Path
@@ -42,6 +43,129 @@ import librosa
 import pyloudnorm as pyln
 from einops import rearrange
 from wan.utils.multitalk_utils import save_video_ffmpeg
+
+logger = logging.getLogger(__name__)
+
+
+def parse_bbox_input(raw: Any) -> Optional[List[float]]:
+    """Parse bbox JSON into [row_min, col_min, row_max, col_max] (see README / Cog Input docs)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Invalid bbox JSON (expected 4 numbers [row_min,col_min,row_max,col_max]): {raw!r}"
+            ) from e
+    elif isinstance(raw, (list, tuple)):
+        parsed = raw
+    else:
+        raise ValueError(
+            f"bbox must be a JSON string or sequence of 4 numbers, got {type(raw).__name__}"
+        )
+    if not isinstance(parsed, (list, tuple)) or len(parsed) != 4:
+        raise ValueError(
+            f"bbox must have exactly 4 values [row_min, col_min, row_max, col_max], got: {parsed!r}"
+        )
+    try:
+        coords = [float(x) for x in parsed]
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"bbox values must be numeric, got: {parsed!r}") from e
+    if not all(math.isfinite(x) for x in coords):
+        raise ValueError(f"bbox values must be finite (no nan or inf), got: {coords}")
+    row_min, col_min, row_max, col_max = coords
+    if row_min >= row_max or col_min >= col_max:
+        raise ValueError(
+            f"bbox requires row_min < row_max and col_min < col_max, got {coords} "
+            f"(wan/multitalk.py uses human_mask[row_min:row_max, col_min:col_max])"
+        )
+    return coords
+
+
+def validate_bboxes_against_cond_image(
+    person1_bbox: List[float],
+    person2_bbox: List[float],
+    cond_image_path: str,
+) -> Tuple[List[float], List[float], int, int]:
+    """
+    Clamp bboxes to the cond image size. Values are [row_min, col_min, row_max, col_max], matching wan/multitalk.py:
+    human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] on shape [src_h, src_w].
+    Returns adjusted boxes and PIL (width, height).
+    """
+    with Image.open(cond_image_path).convert("RGB") as im:
+        img_w, img_h = im.size
+
+    out: List[List[float]] = []
+    for label, box in (("person1_bbox", person1_bbox), ("person2_bbox", person2_bbox)):
+        row_min, col_min, row_max, col_max = box
+        orig = (row_min, col_min, row_max, col_max)
+        rx0 = min(max(0.0, float(row_min)), float(img_h))
+        rx1 = min(max(0.0, float(row_max)), float(img_h))
+        cy0 = min(max(0.0, float(col_min)), float(img_w))
+        cy1 = min(max(0.0, float(col_max)), float(img_w))
+        if rx0 >= rx1 or cy0 >= cy1:
+            raise ValueError(
+                f"{label}: bbox invalid or empty after clamping to PIL image width={img_w} height={img_h} "
+                f"(original {list(orig)}). Rows [row_min,row_max) must satisfy 0 <= row_min < row_max <= {img_h}; "
+                f"cols [col_min,col_max) must satisfy 0 <= col_min < col_max <= {img_w} "
+                f"(same as wan/multitalk.py mask indexing)."
+            )
+        if (rx0, cy0, rx1, cy1) != orig:
+            logger.info(
+                "%s: clamped bbox from %s to [%s, %s, %s, %s] (PIL WxH=%dx%d)",
+                label,
+                list(orig),
+                rx0,
+                cy0,
+                rx1,
+                cy1,
+                img_w,
+                img_h,
+            )
+        out.append([rx0, cy0, rx1, cy1])
+    return out[0], out[1], img_w, img_h
+
+
+def build_bbox_payload(
+    person1_bbox: List[float], person2_bbox: List[float]
+) -> Dict[str, List[float]]:
+    """person1 then person2; each value list is [row_min, col_min, row_max, col_max] for wan/multitalk.py."""
+    return {"person1": list(person1_bbox), "person2": list(person2_bbox)}
+
+
+def resolve_inactive_speaker_mode(
+    inactive_speaker_mode: str, second_audio: Optional[Path]
+) -> str:
+    if inactive_speaker_mode == "auto":
+        return "second_audio" if second_audio is not None else "none"
+    return inactive_speaker_mode
+
+
+def resolve_multitalk_audio_assignment(
+    inactive_eff: str, active_speaker: Optional[str]
+) -> Tuple[bool, Dict[str, Optional[str]]]:
+    """
+    Returns (use_two_audio_files, assign) where assign maps person slots to
+    'first' | 'second' | None (which file drives that slot; None = silent / no file).
+    """
+    if inactive_eff == "second_audio":
+        return True, {"person1": "first", "person2": "second"}
+    if inactive_eff == "none":
+        if active_speaker == "person1":
+            return False, {"person1": "first", "person2": None}
+        if active_speaker == "person2":
+            return False, {"person1": None, "person2": "first"}
+        raise ValueError(
+            "active_speaker (person1 or person2) is required when inactive_speaker_mode is none."
+        )
+    raise ValueError(
+        f"resolve_multitalk_audio_assignment: unexpected inactive_eff={inactive_eff!r} "
+        f"active_speaker={active_speaker!r}"
+    )
 
 
 def loudness_norm(audio_array, sr=16000, lufs=-23):
@@ -256,7 +380,30 @@ class Predictor(BasePredictor):
         turbo: bool = Input(
             description="Enable turbo mode optimizations (adjusts thresholds and guidance scales for speed)",
             default=True
-        )
+        ),
+        person1_bbox: Optional[str] = Input(
+            description="Optional JSON list of 4 floats: [row_min, col_min, row_max, col_max] in pixel indices on the cond image before resize. Matches wan/multitalk.py mask slice human_mask[row_min:row_max, col_min:col_max] with shape [image_height, image_width]. NOT [x1,y1,x2,y2] Cartesian order. If set, person2_bbox is required.",
+            default=None,
+        ),
+        person2_bbox: Optional[str] = Input(
+            description="Same as person1_bbox: [row_min, col_min, row_max, col_max] for person 2. If set, person1_bbox is required.",
+            default=None,
+        ),
+        active_speaker: Optional[str] = Input(
+            description="When using bboxes: which person receives first_audio if inactive_speaker_mode is none; required with person bboxes.",
+            default=None,
+            choices=["person1", "person2"],
+        ),
+        inactive_speaker_mode: str = Input(
+            description="auto: second stream if second_audio is set, else single-stream slots. none: only active_speaker gets audio (needs bboxes). second_audio: two files (first_audio→person1, second_audio→person2).",
+            default="auto",
+            choices=["auto", "none", "second_audio"],
+        ),
+        audio_type: Optional[str] = Input(
+            description="Two-stream mixing for wav2vec prep: para or add. Omit for defaults (para when only one active speaker in two-person mode; add for two-file mode).",
+            default=None,
+            choices=["para", "add"],
+        ),
     ) -> Path:
         """Generate a conversational video from audio and reference image"""
         
@@ -295,67 +442,157 @@ class Predictor(BasePredictor):
         
         print(f"🎬 Generating video with seed: {seed}")
         
+        p1_bbox = parse_bbox_input(person1_bbox)
+        p2_bbox = parse_bbox_input(person2_bbox)
+        if (p1_bbox is None) ^ (p2_bbox is None):
+            raise ValueError(
+                "Both person1_bbox and person2_bbox are required when using bbox mode; omit both for legacy behavior."
+            )
+        bbox_mode = p1_bbox is not None and p2_bbox is not None
+        bbox_img_w = bbox_img_h = 0
+        if bbox_mode:
+            p1_bbox, p2_bbox, bbox_img_w, bbox_img_h = validate_bboxes_against_cond_image(
+                p1_bbox, p2_bbox, str(image)
+            )
+
+        inactive_eff = resolve_inactive_speaker_mode(inactive_speaker_mode, second_audio)
+        if inactive_eff == "second_audio" and second_audio is None:
+            raise ValueError(
+                "second_audio is required when inactive_speaker_mode is second_audio."
+            )
+        if inactive_eff == "none" and second_audio is not None:
+            raise ValueError(
+                "second_audio was provided but inactive_speaker_mode is none; "
+                "use second_audio mode or omit second_audio."
+            )
+
+        use_two_person_pipeline = bbox_mode or (inactive_eff == "second_audio")
+        if bbox_mode and not active_speaker:
+            raise ValueError(
+                "active_speaker (person1 or person2) is required when person1_bbox and person2_bbox are set."
+            )
+        if use_two_person_pipeline and inactive_eff == "none":
+            if not bbox_mode:
+                raise ValueError(
+                    "inactive_speaker_mode=none with two person slots requires person1_bbox and person2_bbox."
+                )
+
+        if audio_type is not None and audio_type not in ("para", "add"):
+            raise ValueError("audio_type must be para or add when set.")
+
+        if audio_type is None:
+            if use_two_person_pipeline and inactive_eff == "none":
+                audio_type_eff = "para"
+            elif use_two_person_pipeline and inactive_eff == "second_audio":
+                audio_type_eff = "add"
+            else:
+                audio_type_eff = "para"
+        else:
+            audio_type_eff = audio_type
+
+        logger.info(
+            "MultiTalk routing: bbox_mode=%s active_speaker=%s inactive_speaker_mode=%s (effective=%s) audio_type=%s",
+            bbox_mode,
+            active_speaker,
+            inactive_speaker_mode,
+            inactive_eff,
+            audio_type_eff,
+        )
+        if bbox_mode:
+            logger.info(
+                "MultiTalk bbox (final, clamped): PIL cond_image width=%d height=%d; "
+                "format [row_min,col_min,row_max,col_max] -> mask[rows,cols] per wan/multitalk.py; "
+                "person1_bbox=%s person2_bbox=%s",
+                bbox_img_w,
+                bbox_img_h,
+                p1_bbox,
+                p2_bbox,
+            )
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            is_multi_person = second_audio is not None
             audio_save_dir = os.path.join(temp_dir, "audio_embeddings")
             os.makedirs(audio_save_dir, exist_ok=True)
-            
-            # Process audio and generate embeddings (following exact original pattern)
-            if is_multi_person:
-                print("🎤 Processing multi-person audio...")
-                audio_type = "add"  # Sequential by default
-                speech1, speech2, combined_speech = audio_prepare_multi(
-                    str(first_audio), str(second_audio), audio_type
+
+            if use_two_person_pipeline:
+                use_two_files, assign = resolve_multitalk_audio_assignment(
+                    inactive_eff, active_speaker
                 )
-                
-                # Generate embeddings on optimal device
-                embedding1 = get_embedding(speech1, self.wav2vec_feature_extractor, self.audio_encoder, device=self.audio_device)
-                embedding2 = get_embedding(speech2, self.wav2vec_feature_extractor, self.audio_encoder, device=self.audio_device)
-                
-                # Save embeddings and audio
-                emb1_path = os.path.join(audio_save_dir, '1.pt')
-                emb2_path = os.path.join(audio_save_dir, '2.pt')
-                sum_audio_path = os.path.join(audio_save_dir, 'sum.wav')
-                
-                torch.save(embedding1, emb1_path)
-                torch.save(embedding2, emb2_path)
+                print("🎤 Processing two-person audio slots...")
+                if use_two_files:
+                    speech1, speech2, combined_speech = audio_prepare_multi(
+                        str(first_audio), str(second_audio), audio_type_eff
+                    )
+                else:
+                    speech_in = audio_prepare_single(str(first_audio))
+                    if assign["person1"] == "first":
+                        speech1, speech2 = speech_in, None
+                    else:
+                        speech1, speech2 = None, speech_in
+                    combined_speech = speech_in
+
+                emb1_path = None
+                emb2_path = None
+                if speech1 is not None:
+                    embedding1 = get_embedding(
+                        speech1,
+                        self.wav2vec_feature_extractor,
+                        self.audio_encoder,
+                        device=self.audio_device,
+                    )
+                    emb1_path = os.path.join(audio_save_dir, "1.pt")
+                    torch.save(embedding1, emb1_path)
+                if speech2 is not None:
+                    embedding2 = get_embedding(
+                        speech2,
+                        self.wav2vec_feature_extractor,
+                        self.audio_encoder,
+                        device=self.audio_device,
+                    )
+                    emb2_path = os.path.join(audio_save_dir, "2.pt")
+                    torch.save(embedding2, emb2_path)
+
+                sum_audio_path = os.path.join(audio_save_dir, "sum.wav")
                 sf.write(sum_audio_path, combined_speech, 16000)
-                
-                # Create input data (exact format from original)
+
                 input_data = {
                     "prompt": prompt,
                     "cond_image": str(image),
-                    "audio_type": audio_type,
+                    "audio_type": audio_type_eff,
                     "cond_audio": {
                         "person1": emb1_path,
-                        "person2": emb2_path
+                        "person2": emb2_path,
                     },
-                    "video_audio": sum_audio_path
+                    "video_audio": sum_audio_path,
                 }
+                if bbox_mode:
+                    input_data["bbox"] = build_bbox_payload(p1_bbox, p2_bbox)
             else:
                 print("🎤 Processing single-person audio...")
                 speech = audio_prepare_single(str(first_audio))
-                embedding = get_embedding(speech, self.wav2vec_feature_extractor, self.audio_encoder, device=self.audio_device)
-                
-                # Save embedding and audio
-                emb_path = os.path.join(audio_save_dir, '1.pt')
-                sum_audio_path = os.path.join(audio_save_dir, 'sum.wav')
-                
+                embedding = get_embedding(
+                    speech,
+                    self.wav2vec_feature_extractor,
+                    self.audio_encoder,
+                    device=self.audio_device,
+                )
+
+                emb_path = os.path.join(audio_save_dir, "1.pt")
+                sum_audio_path = os.path.join(audio_save_dir, "sum.wav")
+
                 torch.save(embedding, emb_path)
                 sf.write(sum_audio_path, speech, 16000)
-                
-                # Create input data (exact format from original)
+
                 input_data = {
                     "prompt": prompt,
                     "cond_image": str(image),
                     "cond_audio": {
-                        "person1": emb_path
+                        "person1": emb_path,
                     },
-                    "video_audio": sum_audio_path
+                    "video_audio": sum_audio_path,
                 }
-            
+
             print("🎬 Generating video...")
-            
+
             # Configure generation parameters based on turbo mode and VRAM availability
             high_vram = torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory > 40 * 1024**3
             

@@ -368,20 +368,32 @@ class MultiTalkPipeline:
             audio_embedding_path_2 = input_data['cond_audio']['person2']
 
         
-        full_audio_embs = []        
+        full_audio_embs = [None] * HUMAN_NUMBER
         audio_embedding_paths = [audio_embedding_path_1, audio_embedding_path_2]
-        for human_idx in range(HUMAN_NUMBER):   
+        for human_idx in range(HUMAN_NUMBER):
             audio_embedding_path = audio_embedding_paths[human_idx]
-            if not os.path.exists(audio_embedding_path):
+            if audio_embedding_path is None:
                 continue
-            full_audio_emb = torch.load(audio_embedding_path)
+            if isinstance(audio_embedding_path, str) and audio_embedding_path.lower() in ("none", ""):
+                continue
+            p = str(audio_embedding_path)
+            if not os.path.exists(p):
+                continue
+            full_audio_emb = torch.load(p, map_location="cpu")
             if torch.isnan(full_audio_emb).any():
                 continue
             if full_audio_emb.shape[0] <= frame_num:
                 continue
-            full_audio_embs.append(full_audio_emb) 
-        
-        assert len(full_audio_embs) == HUMAN_NUMBER, f"Aduio file not exists or length not satisfies frame nums."
+            full_audio_embs[human_idx] = full_audio_emb
+
+        if not any(e is not None for e in full_audio_embs):
+            raise AssertionError(
+                "Audio file not exists or length not satisfies frame nums (no valid embedding paths)."
+            )
+        reference_emb = next(e for e in full_audio_embs if e is not None)
+        for human_idx in range(HUMAN_NUMBER):
+            if full_audio_embs[human_idx] is None:
+                full_audio_embs[human_idx] = torch.zeros_like(reference_emb)
 
         # preprocess text embedding
         if n_prompt == "":
@@ -490,7 +502,9 @@ class MultiTalkPipeline:
                 if 'bbox' in input_data:
                     assert len(input_data['bbox']) == len(input_data['cond_audio']), f"The number of target bbox should be the same with cond_audio"
                     background_mask = torch.zeros([src_h, src_w])
-                    for _, person_bbox in input_data['bbox'].items():
+                    for person_key in ("person1", "person2"):
+                        assert person_key in input_data['bbox'], f"bbox missing required key {person_key}"
+                        person_bbox = input_data['bbox'][person_key]
                         x_min, y_min, x_max, y_max = person_bbox
                         human_mask = torch.zeros([src_h, src_w])
                         human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] = 1

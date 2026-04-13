@@ -88,6 +88,43 @@ Running MultiTalk with Cog is straightforward. The system automatically handles 
       -i prompt="A professional interview taking place in a modern office setting"
     ```
 
+    **Explicit speaker + bboxes**
+
+    Bounding boxes use the **same indexing as `wan/multitalk.py`**, not common “`[x1, y1, x2, y2]` pixel corners” order.
+
+    - **Format:** `[row_min, col_min, row_max, col_max]` (four numbers in that order).
+    - **Meaning:** On the conditioning image, **before** the model resizes it, PIL reports `width` × `height`. Masks are built with shape `[height, width]`. The pipeline does `human_mask[row_min:row_max, col_min:col_max] = 1`: first pair is the **vertical** (row) span, second pair is the **horizontal** (column) span.
+    - **This is not** `[x1, y1, x2, y2]` where people usually put **x = horizontal** first. If you pass corner-style coordinates, **swap** so rows come first and columns second.
+
+    **Example (640×480 image in PIL: `width=640`, `height=480`):** left half of the frame is columns `0–320`, full height rows `0–480` → `[0, 0, 480, 320]`. Right half → `[0, 320, 480, 640]`.
+
+    `inactive_speaker_mode` defaults to `auto` (`second_audio` when `second_audio` is set, otherwise `none`).
+
+    ```bash
+    # Single speaker (unchanged): one person slot, no bboxes
+    cog predict \
+      -i image=@person.jpg \
+      -i first_audio=@speech.wav \
+      -i prompt="A person speaking to camera"
+
+    # Two speakers: same as before — first_audio → person1, second_audio → person2 (default audio_type add)
+    cog predict \
+      -i image=@two_people.jpg \
+      -i first_audio=@left.wav \
+      -i second_audio=@right.wav \
+      -i prompt="Two people in conversation"
+
+    # Two people in frame, only person2 speaks: bboxes [row_min,col_min,row_max,col_max]; 640x480 PIL image (640 wide), left/right halves
+    cog predict \
+      -i image=@duo.jpg \
+      -i first_audio=@only_right_speaks.wav \
+      -i prompt="Two people seated; only one is talking" \
+      -i person1_bbox='[0,0,480,320]' \
+      -i person2_bbox='[0,320,480,640]' \
+      -i active_speaker=person2 \
+      -i inactive_speaker_mode=none
+    ```
+
     Advanced generation control:
     ```bash
     # High-quality long-form generation
