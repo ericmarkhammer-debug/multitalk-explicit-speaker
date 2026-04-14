@@ -531,32 +531,35 @@ class Predictor(BasePredictor):
                     )
                 else:
                     speech_in = audio_prepare_single(str(first_audio))
+                    silent = np.zeros_like(speech_in)
                     if assign["person1"] == "first":
-                        speech1, speech2 = speech_in, None
+                        speech1, speech2 = speech_in, silent
+                        logger.info(
+                            "cond_audio routing (inactive_speaker_mode=none): person1=real speech, person2=silence→embedding"
+                        )
                     else:
-                        speech1, speech2 = None, speech_in
+                        speech1, speech2 = silent, speech_in
+                        logger.info(
+                            "cond_audio routing (inactive_speaker_mode=none): person1=silence→embedding, person2=real speech"
+                        )
                     combined_speech = speech_in
 
-                emb1_path = None
-                emb2_path = None
-                if speech1 is not None:
-                    embedding1 = get_embedding(
-                        speech1,
-                        self.wav2vec_feature_extractor,
-                        self.audio_encoder,
-                        device=self.audio_device,
-                    )
-                    emb1_path = os.path.join(audio_save_dir, "1.pt")
-                    torch.save(embedding1, emb1_path)
-                if speech2 is not None:
-                    embedding2 = get_embedding(
-                        speech2,
-                        self.wav2vec_feature_extractor,
-                        self.audio_encoder,
-                        device=self.audio_device,
-                    )
-                    emb2_path = os.path.join(audio_save_dir, "2.pt")
-                    torch.save(embedding2, emb2_path)
+                embedding1 = get_embedding(
+                    speech1,
+                    self.wav2vec_feature_extractor,
+                    self.audio_encoder,
+                    device=self.audio_device,
+                )
+                embedding2 = get_embedding(
+                    speech2,
+                    self.wav2vec_feature_extractor,
+                    self.audio_encoder,
+                    device=self.audio_device,
+                )
+                emb1_path = os.path.join(audio_save_dir, "1.pt")
+                emb2_path = os.path.join(audio_save_dir, "2.pt")
+                torch.save(embedding1, emb1_path)
+                torch.save(embedding2, emb2_path)
 
                 sum_audio_path = os.path.join(audio_save_dir, "sum.wav")
                 sf.write(sum_audio_path, combined_speech, 16000)
