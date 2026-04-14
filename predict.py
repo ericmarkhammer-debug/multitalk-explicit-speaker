@@ -326,7 +326,7 @@ class Predictor(BasePredictor):
             t5_fsdp=False,
             dit_fsdp=False, 
             use_usp=False,
-            t5_cpu=False  # Keep T5 on GPU for speed
+            t5_cpu=True
         )
         
         # GPU optimizations for high-VRAM setup (A100/H100/H200)
@@ -338,11 +338,10 @@ class Predictor(BasePredictor):
                 print("🚀 High-VRAM detected: Enabling maximum performance optimizations")
                 # Enable advanced GPU features for maximum speed
                 torch.backends.cuda.enable_flash_sdp(True)
-                torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
-                torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 for faster matmul
-                torch.backends.cudnn.allow_tf32 = True  # Enable TF32 for convolutions
                 torch.cuda.empty_cache()  # Clear any existing memory
-                print("⚡ Enabled Flash-SDP, TF32, and cuDNN benchmarking for maximum throughput")
+                print(
+                    "⚡ Enabled Flash-SDP (cuDNN benchmark / TF32 in predict if high-VRAM)"
+                )
             else:
                 print("🔧 Standard GPU optimizations enabled")
                 torch.backends.cuda.enable_flash_sdp(True)
@@ -516,6 +515,7 @@ class Predictor(BasePredictor):
                 p2_bbox,
             )
 
+        speech_slots_info = "single-person: cond_audio person1 only"
         with tempfile.TemporaryDirectory() as temp_dir:
             audio_save_dir = os.path.join(temp_dir, "audio_embeddings")
             os.makedirs(audio_save_dir, exist_ok=True)
@@ -524,6 +524,16 @@ class Predictor(BasePredictor):
                 use_two_files, assign = resolve_multitalk_audio_assignment(
                     inactive_eff, active_speaker
                 )
+                if use_two_files:
+                    speech_slots_info = (
+                        "two-file: person1<-first_audio, person2<-second_audio"
+                    )
+                else:
+                    speech_slots_info = (
+                        "person1=real speech, person2=silence embedding"
+                        if assign["person1"] == "first"
+                        else "person1=silence embedding, person2=real speech"
+                    )
                 print("🎤 Processing two-person audio slots...")
                 if use_two_files:
                     speech1, speech2, combined_speech = audio_prepare_multi(
@@ -601,17 +611,15 @@ class Predictor(BasePredictor):
                     "video_audio": sum_audio_path,
                 }
 
-            print("🎬 Generating video...")
-
             # Configure generation parameters based on turbo mode and VRAM availability
             high_vram = torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory > 40 * 1024**3
-            
+
             if turbo:
                 teacache_thresh = 0.8
                 text_guide_scale = 3.0
                 audio_guide_scale = 3.0
                 shift = 5.0
-                offload_model = False  # Never offload in turbo mode
+                offload_model = not high_vram
                 print(f"🚀 TURBO MODE: {sampling_steps} steps, thresh={teacache_thresh}")
             else:
                 teacache_thresh = 0.3
@@ -620,7 +628,12 @@ class Predictor(BasePredictor):
                 shift = 7.0
                 offload_model = not high_vram  # Don't offload with high VRAM for maximum speed
                 print(f"🎬 QUALITY MODE: {sampling_steps} steps{', keeping models in GPU' if high_vram else ''}")
-            
+
+            if high_vram and torch.cuda.is_available():
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+
             # Configure optimizations using SimpleNamespace (matching original)
             extra_args = SimpleNamespace(
                 use_teacache=True,
@@ -628,7 +641,19 @@ class Predictor(BasePredictor):
                 use_apg=False,
                 size='multitalk-480'
             )
-            
+
+            bbox_wh_str = (
+                f"{bbox_img_w}x{bbox_img_h}"
+                if bbox_mode
+                else "n/a (bbox_mode=False)"
+            )
+            print(
+                f"[pre-gen] cond_image PIL WxH (bbox validation)={bbox_wh_str} | "
+                f"active_speaker={active_speaker!r} | person1_bbox={p1_bbox} | "
+                f"person2_bbox={p2_bbox} | audio_slots: {speech_slots_info}"
+            )
+            print("🎬 Generating video...")
+
             # Generate video using loaded pipeline (exact parameters from original)
             video = self.wan_i2v.generate(
                 input_data,
