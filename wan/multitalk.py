@@ -583,8 +583,8 @@ class MultiTalkPipeline:
                     'clip_fea': clip_context,
                     'seq_len': max_seq_len,
                     'y': y,
-                    # Match cond/drop_text human count; [-1:] forced human_num==1 and broke 2p CFG.
-                    'audio': torch.zeros_like(audio_embs),
+                    # Keep human_num==2 but avoid collapsing CFG audio guidance
+                    'audio': audio_embs * 0.01,
                     'ref_target_masks': ref_target_masks
                 }
 
