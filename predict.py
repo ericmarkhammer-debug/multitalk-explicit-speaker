@@ -246,6 +246,10 @@ def audio_prepare_single(audio_path, sample_rate=16000):
         return human_speech_array
 
 
+def audio_file_duration_sec(path: str) -> float:
+    return float(sf.info(path).duration)
+
+
 def audio_prepare_multi(left_path, right_path, audio_type, sample_rate=16000):
     human_speech_array1 = audio_prepare_single(left_path)
     human_speech_array2 = audio_prepare_single(right_path)
@@ -622,6 +626,29 @@ class Predictor(BasePredictor):
                     speech1, speech2, combined_speech = audio_prepare_multi(
                         first_audio_path, second_audio_path, audio_type_eff
                     )
+                    d_first_file = audio_file_duration_sec(first_audio_path)
+                    d_second_file = audio_file_duration_sec(second_audio_path)
+                    d_combined = len(combined_speech) / 16000.0
+                    video_audio_arr = combined_speech
+                    video_audio_choice = "sum.wav (time-multiplexed combined_speech)"
+                    if inactive_eff == "second_audio":
+                        if first_audio is None:
+                            video_audio_arr = audio_prepare_single(second_audio_path)
+                            video_audio_choice = (
+                                "real second_audio only (first slot was synthetic silence)"
+                            )
+                        elif second_audio is None:
+                            video_audio_arr = audio_prepare_single(first_audio_path)
+                            video_audio_choice = (
+                                "real first_audio only (second slot was synthetic silence)"
+                            )
+                    d_video = len(video_audio_arr) / 16000.0
+                    print(
+                        f"[audio-dur] first_audio_file={d_first_file:.3f}s "
+                        f"second_audio_file={d_second_file:.3f}s "
+                        f"combined_speech={d_combined:.3f}s "
+                        f"video_audio_duration={d_video:.3f}s choice={video_audio_choice}"
+                    )
                 else:
                     speech_in = audio_prepare_single(first_audio_path)
                     silent = np.zeros_like(speech_in)
@@ -657,6 +684,24 @@ class Predictor(BasePredictor):
                 sum_audio_path = os.path.join(audio_save_dir, "sum.wav")
                 sf.write(sum_audio_path, combined_speech, 16000)
 
+                if use_two_files:
+                    if (
+                        inactive_eff == "second_audio"
+                        and (first_audio is None or second_audio is None)
+                    ):
+                        video_audio_path = os.path.join(audio_save_dir, "video_mux.wav")
+                        sf.write(video_audio_path, video_audio_arr, 16000)
+                    else:
+                        video_audio_path = sum_audio_path
+                    print(f"[audio-dur] video_audio_path={video_audio_path!r}")
+                else:
+                    video_audio_path = sum_audio_path
+                    print(
+                        f"[audio-dur] first_audio_file={audio_file_duration_sec(first_audio_path):.3f}s "
+                        f"combined_speech={len(combined_speech) / 16000.0:.3f}s "
+                        f"video_audio_path={video_audio_path!r} choice=sum.wav (single active speaker)"
+                    )
+
                 input_data = {
                     "prompt": prompt,
                     "cond_image": str(image),
@@ -665,7 +710,7 @@ class Predictor(BasePredictor):
                         "person1": emb1_path,
                         "person2": emb2_path,
                     },
-                    "video_audio": sum_audio_path,
+                    "video_audio": video_audio_path,
                 }
                 if bbox_mode:
                     input_data["bbox"] = build_bbox_payload(p1_bbox, p2_bbox)
