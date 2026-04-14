@@ -406,8 +406,9 @@ class MultiTalkPipeline:
         else:
             context = self.text_encoder([input_prompt], torch.device('cpu'))
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+            # Match t5_cpu=False: one tensor each (encoder returns list per batch text).
+            context = context[0].to(self.device)
+            context_null = context_null[0].to(self.device)
 
         torch_gc()
         # prepare params for video generation
