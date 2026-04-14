@@ -431,7 +431,7 @@ class MultiTalkPipeline:
         torch.backends.cudnn.deterministic = True
 
         if HUMAN_NUMBER == 2:
-            print("VERSION: slot2-lipsync-fix-v1 (multitalk two-human path)")
+            print("VERSION: multitalk-v3-slot0-debug-remap (multitalk two-human path)")
             print(
                 f"[slot2-debug] HUMAN_NUMBER=2 cond_audio dim0 order:0=person1, 1=person2"
             )

@@ -406,7 +406,7 @@ class Predictor(BasePredictor):
         ),
     ) -> CogPath:
         """Generate a conversational video from audio and reference image"""
-        print("VERSION: slot2-lipsync-fix-v1")
+        print("VERSION: multitalk-v3-slot0-debug-remap")
 
         # Optional inputs use non-union types for Cog schema; normalize sentinels for runtime.
         if isinstance(active_speaker, str) and not active_speaker.strip():
@@ -587,6 +587,33 @@ class Predictor(BasePredictor):
                 }
                 if bbox_mode:
                     input_data["bbox"] = build_bbox_payload(p1_bbox, p2_bbox)
+                    force_speaking_face_into_slot0_for_debug = True
+                    if (
+                        bbox_mode
+                        and inactive_eff == "none"
+                        and not use_two_files
+                        and active_speaker == "person2"
+                        and force_speaking_face_into_slot0_for_debug
+                    ):
+                        print(
+                            "DEBUG SLOT0 REMAP ACTIVE: physical person2 remapped to model slot0"
+                        )
+                        input_data["cond_audio"] = {
+                            "person1": emb2_path,
+                            "person2": emb1_path,
+                        }
+                        b = input_data["bbox"]
+                        input_data["bbox"] = {
+                            "person1": b["person2"],
+                            "person2": b["person1"],
+                        }
+                        speech_slots_info += (
+                            " | keys swapped for model: person1_key=physical person2 (speech)"
+                        )
+                        logger.info(
+                            "inactive_speaker_mode=none, active_speaker=person2: swapped "
+                            "cond_audio and bbox person1/person2 so speech uses model slot 0."
+                        )
             else:
                 print("🎤 Processing single-person audio...")
                 speech = audio_prepare_single(str(first_audio))

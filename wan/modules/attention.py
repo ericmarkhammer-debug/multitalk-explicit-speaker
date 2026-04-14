@@ -347,8 +347,8 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         human1 = normalize_and_scale(x_ref_attn_map[0], (human1_min_value, human1_max_value), (self.rope_h1[0], self.rope_h1[1]))
         human2 = normalize_and_scale(x_ref_attn_map[1], (human2_min_value, human2_max_value), (self.rope_h2[0], self.rope_h2[1]))
         back   = torch.full((x_ref_attn_map.size(1),), self.rope_bak, dtype=human1.dtype).to(human1.device)
-        # argmax(dim=0) breaks ties as index 0 (person1), mis-pairing Q RoPE with K/audio half for person2.
-        max_indices = (x_ref_attn_map[1] >= x_ref_attn_map[0]).long()
+        # Ties must go to person1: (map[1]>=map[0]) makes equal-map tokens all pick rope_h2 and freezes motion.
+        max_indices = x_ref_attn_map.argmax(dim=0)
         normalized_map = torch.stack([human1, human2, back], dim=1)
         normalized_pos = normalized_map[range(x_ref_attn_map.size(1)), max_indices] # N 
 
