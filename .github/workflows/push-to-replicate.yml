@@ -28,6 +28,8 @@ jobs:
         run: |
           echo "GITHUB_SHA=$GITHUB_SHA"
           git rev-parse HEAD
+          echo "---- requirements.txt ----"
+          cat requirements.txt
           echo "---- cog.yaml ----"
           cat cog.yaml
 
