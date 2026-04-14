@@ -166,6 +166,52 @@ def resolve_multitalk_audio_assignment(
     )
 
 
+def cog_audio_input_to_local_path(audio: Any, dest_dir: str, base_name: str) -> str:
+    """Cog Path, local path, or File/URLFile -> path string librosa/ffmpeg can open."""
+    if isinstance(audio, (str, os.PathLike)):
+        p = os.fspath(audio)
+        if os.path.isfile(p):
+            return p
+        raise FileNotFoundError(f"audio input path does not exist: {p}")
+    read_fn = getattr(audio, "read", None)
+    if callable(read_fn):
+        data = read_fn()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        url_name = getattr(audio, "name", "") or ""
+        ext = os.path.splitext(url_name)[1]
+        if ext.lower() not in (
+            ".wav",
+            ".mp3",
+            ".m4a",
+            ".flac",
+            ".ogg",
+            ".mp4",
+            ".mov",
+            ".avi",
+            ".mkv",
+        ):
+            ext = ".wav"
+        out = os.path.join(dest_dir, f"{base_name}{ext}")
+        with open(out, "wb") as f:
+            f.write(data)
+        return out
+    for attr in ("path", "filename"):
+        p = getattr(audio, attr, None)
+        if isinstance(p, str) and os.path.isfile(p):
+            return p
+    raise TypeError(f"Unsupported audio input type {type(audio)!r}")
+
+
+def silent_wav_path_matching_reference(
+    ref_audio_path: str, dest_dir: str, base_name: str, sample_rate: int = 16000
+) -> str:
+    ref = audio_prepare_single(ref_audio_path, sample_rate=sample_rate)
+    out = os.path.join(dest_dir, f"{base_name}.wav")
+    sf.write(out, np.zeros_like(ref), sample_rate)
+    return out
+
+
 def loudness_norm(audio_array, sr=16000, lufs=-23):
     meter = pyln.Meter(sr)
     loudness = meter.integrated_loudness(audio_array)
@@ -352,7 +398,10 @@ class Predictor(BasePredictor):
     def predict(
         self,
         image: CogPath = Input(description="Reference image containing the person(s) for video generation"),
-        first_audio: CogPath = Input(description="First audio file for driving the conversation"),
+        first_audio: CogPath = Input(
+            description="First audio slot (person1 in two-file mode). Optional if second_audio is set.",
+            default=None,
+        ),
         prompt: str = Input(
             description="Text prompt describing the desired interaction or conversation scenario",
             default="A smiling man and woman wearing headphones sit in front of microphones, appearing to host a podcast."
@@ -390,12 +439,12 @@ class Predictor(BasePredictor):
             default=None,
         ),
         active_speaker: str = Input(
-            description="When using bboxes: which person receives first_audio if inactive_speaker_mode is none; required with person bboxes.",
+            description="When using bboxes: which person receives the provided speech if inactive_speaker_mode is none; required with person bboxes.",
             default=None,
             choices=["person1", "person2"],
         ),
         inactive_speaker_mode: str = Input(
-            description="auto: second stream if second_audio is set, else single-stream slots. none: only active_speaker gets audio (needs bboxes). second_audio: two files (first_audio→person1, second_audio→person2).",
+            description="auto: two streams if second_audio is set (second-only uses a silent first slot), else single-stream from first_audio. none: one speech track; use first_audio or second_audio (needs bboxes). second_audio: two slots (first→person1, second→person2); missing side is silent.",
             default="auto",
             choices=["auto", "none", "second_audio"],
         ),
@@ -462,16 +511,10 @@ class Predictor(BasePredictor):
                 p1_bbox, p2_bbox, str(image)
             )
 
+        if first_audio is None and second_audio is None:
+            raise ValueError("Provide at least one of first_audio or second_audio.")
+
         inactive_eff = resolve_inactive_speaker_mode(inactive_speaker_mode, second_audio)
-        if inactive_eff == "second_audio" and second_audio is None:
-            raise ValueError(
-                "second_audio is required when inactive_speaker_mode is second_audio."
-            )
-        if inactive_eff == "none" and second_audio is not None:
-            raise ValueError(
-                "second_audio was provided but inactive_speaker_mode is none; "
-                "use second_audio mode or omit second_audio."
-            )
 
         use_two_person_pipeline = bbox_mode or (inactive_eff == "second_audio")
         if bbox_mode and not active_speaker:
@@ -521,6 +564,45 @@ class Predictor(BasePredictor):
             audio_save_dir = os.path.join(temp_dir, "audio_embeddings")
             os.makedirs(audio_save_dir, exist_ok=True)
 
+            first_audio_path = (
+                cog_audio_input_to_local_path(first_audio, temp_dir, "first_audio")
+                if first_audio is not None
+                else None
+            )
+            second_audio_path = (
+                cog_audio_input_to_local_path(
+                    second_audio, temp_dir, "second_audio"
+                )
+                if second_audio is not None
+                else None
+            )
+
+            if inactive_eff == "none":
+                if first_audio_path is not None and second_audio_path is not None:
+                    raise ValueError(
+                        "inactive_speaker_mode=none: provide only one of first_audio or second_audio."
+                    )
+                if first_audio_path is None and second_audio_path is not None:
+                    first_audio_path = second_audio_path
+                    second_audio_path = None
+
+            if use_two_person_pipeline and inactive_eff == "second_audio":
+                if first_audio_path is None:
+                    first_audio_path = silent_wav_path_matching_reference(
+                        second_audio_path, temp_dir, "first_audio_silent"
+                    )
+                elif second_audio_path is None:
+                    second_audio_path = silent_wav_path_matching_reference(
+                        first_audio_path, temp_dir, "second_audio_silent"
+                    )
+
+            print(
+                f"[audio-path] has_first_audio={first_audio is not None} "
+                f"has_second_audio={second_audio is not None} "
+                f"first_audio_path={first_audio_path!r} "
+                f"second_audio_path={second_audio_path!r}"
+            )
+
             if use_two_person_pipeline:
                 use_two_files, assign = resolve_multitalk_audio_assignment(
                     inactive_eff, active_speaker
@@ -538,10 +620,10 @@ class Predictor(BasePredictor):
                 print("🎤 Processing two-person audio slots...")
                 if use_two_files:
                     speech1, speech2, combined_speech = audio_prepare_multi(
-                        str(first_audio), str(second_audio), audio_type_eff
+                        first_audio_path, second_audio_path, audio_type_eff
                     )
                 else:
-                    speech_in = audio_prepare_single(str(first_audio))
+                    speech_in = audio_prepare_single(first_audio_path)
                     silent = np.zeros_like(speech_in)
                     if assign["person1"] == "first":
                         speech1, speech2 = speech_in, silent
@@ -616,7 +698,7 @@ class Predictor(BasePredictor):
                         )
             else:
                 print("🎤 Processing single-person audio...")
-                speech = audio_prepare_single(str(first_audio))
+                speech = audio_prepare_single(first_audio_path)
                 embedding = get_embedding(
                     speech,
                     self.wav2vec_feature_extractor,
