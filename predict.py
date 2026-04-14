@@ -406,6 +406,7 @@ class Predictor(BasePredictor):
         ),
     ) -> CogPath:
         """Generate a conversational video from audio and reference image"""
+        print("VERSION: slot2-lipsync-fix-v1")
 
         # Optional inputs use non-union types for Cog schema; normalize sentinels for runtime.
         if isinstance(active_speaker, str) and not active_speaker.strip():

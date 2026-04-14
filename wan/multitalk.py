@@ -430,6 +430,19 @@ class MultiTalkPipeline:
         random.seed(seed)
         torch.backends.cudnn.deterministic = True
 
+        if HUMAN_NUMBER == 2:
+            print("VERSION: slot2-lipsync-fix-v1 (multitalk two-human path)")
+            print(
+                f"[slot2-debug] HUMAN_NUMBER=2 cond_audio dim0 order:0=person1, 1=person2"
+            )
+            for hi in range(HUMAN_NUMBER):
+                e = full_audio_embs[hi]
+                nz = (e.abs() > 1e-6).float().mean().item()
+                print(
+                    f"[slot2-debug] full_audio_emb[hi={hi}] T={e.shape[0]} "
+                    f"nonzero_frac={nz:.4f} norm={e.detach().float().norm().item():.2f}"
+                )
+
         # start video generation iteratively
         while True:
             audio_embs = []
@@ -446,6 +459,18 @@ class MultiTalkPipeline:
                 audio_emb = full_audio_embs[human_idx][center_indices][None,...].to(self.device)
                 audio_embs.append(audio_emb)
             audio_embs = torch.concat(audio_embs, dim=0).to(self.param_dtype)
+            if HUMAN_NUMBER == 2 and audio_start_idx == 0:
+                print(
+                    f"[slot2-debug] window audio_embs shape={tuple(audio_embs.shape)} "
+                    f"dtype={audio_embs.dtype} (dim0: person1,person2)"
+                )
+                for hi in range(HUMAN_NUMBER):
+                    wtensor = audio_embs[hi]
+                    print(
+                        f"[slot2-debug] window[hi={hi}] "
+                        f"norm={wtensor.detach().float().norm().item():.2f} "
+                        f"mean_abs={wtensor.detach().float().abs().mean().item():.6f}"
+                    )
             torch_gc()
 
             h, w = cond_image.shape[-2], cond_image.shape[-1]
