@@ -292,12 +292,6 @@ def get_embedding(speech_array, wav2vec_feature_extractor, audio_encoder, sr=160
     return audio_emb
 
 
-def _emb_flat_norm(emb: torch.Tensor | None) -> float:
-    if emb is None:
-        return float("nan")
-    return float(torch.linalg.norm(emb.reshape(-1)))
-
-
 def download_weights(url: str, dest: str) -> None:
     start = time.time()
     print("[!] Initiating download from URL: ", url)
@@ -544,7 +538,13 @@ class Predictor(BasePredictor):
             if use_two_person_pipeline and inactive_eff == "none":
                 audio_type_eff = "para"
             elif use_two_person_pipeline and inactive_eff == "second_audio":
-                audio_type_eff = "add"
+                # "add" time-multiplexes streams (2× length); early video frames then align
+                # with the long zero prefix on the non-speaking track's wav2vec input.
+                # Single uploaded file + synthetic silence must stay time-aligned (para).
+                if first_audio is None or second_audio is None:
+                    audio_type_eff = "para"
+                else:
+                    audio_type_eff = "add"
             else:
                 audio_type_eff = "para"
         else:
@@ -682,19 +682,6 @@ class Predictor(BasePredictor):
                     self.audio_encoder,
                     device=self.audio_device,
                 )
-                if use_two_files and inactive_eff == "second_audio":
-                    n1_pre = _emb_flat_norm(embedding1)
-                    n2_pre = _emb_flat_norm(embedding2)
-                    if first_audio is None and embedding1 is not None:
-                        embedding1 = torch.zeros_like(embedding1)
-                    if second_audio is None and embedding2 is not None:
-                        embedding2 = torch.zeros_like(embedding2)
-                    n1_post = _emb_flat_norm(embedding1)
-                    n2_post = _emb_flat_norm(embedding2)
-                    print(
-                        f"[emb-weaken] slot0(person1) norm before={n1_pre:.3f} after={n1_post:.3f} ; "
-                        f"slot1(person2) norm before={n2_pre:.3f} after={n2_post:.3f}"
-                    )
                 emb1_path = os.path.join(audio_save_dir, "1.pt")
                 emb2_path = os.path.join(audio_save_dir, "2.pt")
                 torch.save(embedding1, emb1_path)
