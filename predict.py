@@ -84,32 +84,35 @@ def parse_bbox_input(raw: Any) -> List[float] | None:
     return coords
 
 
-def complement_mask_tensor(
-    img_h: int, img_w: int, subtract_rect: List[float]
-) -> torch.Tensor:
+def default_half_face_bbox(
+    img_w: int, img_h: int, half: str, face_scale: float = 0.05
+) -> List[float]:
     """
-    Binary float mask [img_h, img_w] = 1 outside subtract_rect, 0 inside (speaker region).
-    subtract_rect is [row_min, col_min, row_max, col_max] on the cond image (wan/multitalk coords).
+    Default [row_min, col_min, row_max, col_max] for one person, matching wan/multitalk.py
+    no-bbox left/right face strips (before resize), on PIL width x height.
     """
-    m = torch.ones(img_h, img_w, dtype=torch.float32)
-    r0 = int(max(0, min(float(subtract_rect[0]), img_h)))
-    r1 = int(max(0, min(float(subtract_rect[2]), img_h)))
-    c0 = int(max(0, min(float(subtract_rect[1]), img_w)))
-    c1 = int(max(0, min(float(subtract_rect[3]), img_w)))
-    if r0 < r1 and c0 < c1:
-        m[r0:r1, c0:c1] = 0.0
-    return m
+    if half not in ("left", "right"):
+        raise ValueError(f"half must be 'left' or 'right', got {half!r}")
+    v0, v1 = int(img_h * face_scale), int(img_h * (1 - face_scale))
+    half_w = img_w // 2
+    if half == "left":
+        c0, c1 = int(half_w * face_scale), int(half_w * (1 - face_scale))
+    else:
+        c0 = int(half_w * face_scale + half_w)
+        c1 = int(half_w * (1 - face_scale) + half_w)
+    return [float(v0), float(c0), float(v1), float(c1)]
 
 
 def resolve_two_person_bboxes(
     person1_bbox: Optional[List[float]],
     person2_bbox: Optional[List[float]],
     cond_image_path: str,
-) -> Tuple[Optional[List[float]], Optional[List[float]], int, int, bool, bool]:
+    face_scale: float = 0.05,
+) -> Tuple[List[float], List[float], int, int, bool, bool]:
     """
-    Clamp user bboxes. Omitted side is filled in multitalk via a dense complement mask
-    (full frame minus the other person's box) so only the speaker's head box need be drawn.
-    Returns (p1_rect or None, p2_rect or None, img_w, img_h, p1_auto, p2_auto).
+    Clamp user bboxes; omitted side gets the same default left/right face strip as no-bbox
+    multitalk (narrow band — required for stable ref attention / argmax routing).
+    Returns (p1, p2, img_w, img_h, p1_auto, p2_auto).
     """
     with Image.open(cond_image_path).convert("RGB") as im:
         img_w, img_h = im.size
@@ -158,35 +161,37 @@ def resolve_two_person_bboxes(
         out2 = _clamp_user("person2_bbox", person2_bbox)
 
     if out1 is None:
-        p1_auto = True
         if out2 is None:
             raise ValueError(
                 "resolve_two_person_bboxes: cannot omit person1_bbox when person2_bbox is also omitted"
             )
+        out1 = default_half_face_bbox(img_w, img_h, "left", face_scale)
+        p1_auto = True
         logger.info(
-            "person1_bbox omitted: inactive person1 will use dense mask = full frame minus person2 box."
+            "person1_bbox omitted: using default left-half face strip %s (matches no-bbox multitalk).",
+            out1,
         )
     if out2 is None:
-        p2_auto = True
         if out1 is None:
             raise ValueError(
                 "resolve_two_person_bboxes: cannot omit person2_bbox when person1_bbox is also omitted"
             )
+        out2 = default_half_face_bbox(img_w, img_h, "right", face_scale)
+        p2_auto = True
         logger.info(
-            "person2_bbox omitted: inactive person2 will use dense mask = full frame minus person1 box."
+            "person2_bbox omitted: using default right-half face strip %s (matches no-bbox multitalk).",
+            out2,
         )
 
+    assert out1 is not None and out2 is not None
     return out1, out2, img_w, img_h, p1_auto, p2_auto
 
 
 def build_bbox_payload(
-    person1_bbox: Optional[List[float]], person2_bbox: Optional[List[float]]
-) -> Dict[str, Any]:
-    """Each value is [row_min, col_min, row_max, col_max] or None if supplied via bbox_dense_paths only."""
-    return {
-        "person1": None if person1_bbox is None else list(person1_bbox),
-        "person2": None if person2_bbox is None else list(person2_bbox),
-    }
+    person1_bbox: List[float], person2_bbox: List[float]
+) -> Dict[str, List[float]]:
+    """person1 then person2; each value list is [row_min, col_min, row_max, col_max] for wan/multitalk.py."""
+    return {"person1": list(person1_bbox), "person2": list(person2_bbox)}
 
 
 def resolve_inactive_speaker_mode(
@@ -489,11 +494,11 @@ class Predictor(BasePredictor):
             default=True
         ),
         person1_bbox: str = Input(
-            description="Optional JSON list: [row_min, col_min, row_max, col_max] on the cond image. Omit the non-speaker's bbox: backend fills that slot with a dense mask = full frame minus the other person's box. Send only the speaking person's face-centered box when paired with active_speaker.",
+            description="Optional JSON list: [row_min, col_min, row_max, col_max] on the cond image. Omit one side to only box the speaker's face; the other slot gets the default left/right face strip (same geometry as no-bbox multitalk — do not use full-frame complements; they break ref attention).",
             default=None,
         ),
         person2_bbox: str = Input(
-            description="Optional JSON list: [row_min, col_min, row_max, col_max] on the cond image (PIL width=cols, height=rows). Matches wan/multitalk.py. Omit the non-speaker's bbox: backend uses a dense mask = full frame minus the other person's box (works for cinematic layouts; center the speaker box on the mouth/face).",
+            description="Optional JSON list: [row_min, col_min, row_max, col_max] on the cond image (PIL width=cols, height=rows). Omit the non-speaker's bbox to auto-fill that slot with the default half-frame face strip (same as no-bbox multitalk). Center the speaker box on the face.",
             default=None,
         ),
         active_speaker: str = Input(
@@ -601,7 +606,7 @@ class Predictor(BasePredictor):
             if not bbox_mode:
                 raise ValueError(
                     "inactive_speaker_mode=none with two person slots requires at least one person bbox "
-                    "(the other side uses a complement-of-speaker dense mask)."
+                    "(the other side uses the default half-frame face strip)."
                 )
 
         if audio_type is not None and audio_type not in ("para", "add"):
@@ -635,7 +640,7 @@ class Predictor(BasePredictor):
             logger.info(
                 "MultiTalk bbox (final): PIL cond_image width=%d height=%d; "
                 "format [row_min,col_min,row_max,col_max] -> mask[rows,cols] per wan/multitalk.py; "
-                "person1_rect=%s (inactive_complement_dense=%s) person2_rect=%s (inactive_complement_dense=%s)",
+                "person1_bbox=%s (auto_default_strip=%s) person2_bbox=%s (auto_default_strip=%s)",
                 bbox_img_w,
                 bbox_img_h,
                 p1_bbox,
@@ -795,25 +800,6 @@ class Predictor(BasePredictor):
                 }
                 if bbox_mode:
                     input_data["bbox"] = build_bbox_payload(p1_bbox, p2_bbox)
-                    bbox_dense_paths: Dict[str, str] = {}
-                    if bbox_p1_auto:
-                        assert p2_bbox is not None
-                        dp1 = os.path.join(temp_dir, "bbox_dense_person1_complement.pt")
-                        torch.save(
-                            complement_mask_tensor(bbox_img_h, bbox_img_w, p2_bbox),
-                            dp1,
-                        )
-                        bbox_dense_paths["person1"] = dp1
-                    if bbox_p2_auto:
-                        assert p1_bbox is not None
-                        dp2 = os.path.join(temp_dir, "bbox_dense_person2_complement.pt")
-                        torch.save(
-                            complement_mask_tensor(bbox_img_h, bbox_img_w, p1_bbox),
-                            dp2,
-                        )
-                        bbox_dense_paths["person2"] = dp2
-                    if bbox_dense_paths:
-                        input_data["bbox_dense_paths"] = bbox_dense_paths
                     force_speaking_face_into_slot0_for_debug = True
                     if (
                         bbox_mode
@@ -834,12 +820,6 @@ class Predictor(BasePredictor):
                             "person1": b["person2"],
                             "person2": b["person1"],
                         }
-                        bdp = input_data.get("bbox_dense_paths")
-                        if bdp:
-                            input_data["bbox_dense_paths"] = {
-                                "person1": bdp.get("person2"),
-                                "person2": bdp.get("person1"),
-                            }
                         speech_slots_info += (
                             " | keys swapped for model: person1_key=physical person2 (speech)"
                         )

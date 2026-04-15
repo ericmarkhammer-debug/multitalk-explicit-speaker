@@ -527,34 +527,13 @@ class MultiTalkPipeline:
             elif HUMAN_NUMBER==2:
                 if 'bbox' in input_data:
                     assert len(input_data['bbox']) == len(input_data['cond_audio']), f"The number of target bbox should be the same with cond_audio"
-                    dense_paths = input_data.get("bbox_dense_paths") or {}
                     background_mask = torch.zeros([src_h, src_w])
                     for person_key in ("person1", "person2"):
                         assert person_key in input_data['bbox'], f"bbox missing required key {person_key}"
-                        dp = dense_paths.get(person_key)
-                        if dp:
-                            human_mask = torch.load(dp, map_location="cpu")
-                            if human_mask.ndim != 2:
-                                raise ValueError(
-                                    f"bbox_dense_paths[{person_key!r}] must be a 2D tensor, got shape {tuple(human_mask.shape)}"
-                                )
-                            human_mask = human_mask.to(torch.float32)
-                            if human_mask.shape != (src_h, src_w):
-                                raise ValueError(
-                                    f"bbox_dense_paths[{person_key!r}] shape {tuple(human_mask.shape)} "
-                                    f"!= cond image ({src_h}, {src_w}) [height, width]"
-                                )
-                            human_mask = (human_mask > 0).to(torch.float32)
-                        else:
-                            person_bbox = input_data['bbox'][person_key]
-                            if person_bbox is None:
-                                raise ValueError(
-                                    f"bbox[{person_key!r}] is None but no bbox_dense_paths[{person_key!r}] — "
-                                    "provide a rectangle or a dense mask path from predict."
-                                )
-                            x_min, y_min, x_max, y_max = person_bbox
-                            human_mask = torch.zeros([src_h, src_w])
-                            human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] = 1
+                        person_bbox = input_data['bbox'][person_key]
+                        x_min, y_min, x_max, y_max = person_bbox
+                        human_mask = torch.zeros([src_h, src_w])
+                        human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] = 1
                         background_mask += human_mask
                         human_masks.append(human_mask)
                 else:
